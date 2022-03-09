@@ -1,6 +1,8 @@
 import apache_beam as beam  # modelo de programação para definir o ETL na pipeline
 from apache_beam.options.pipeline_options import PipelineOptions
-from apache_beam.io import ReadFromText  # realizar a leitura dos arquivos
+from apache_beam.io import ReadFromText, WriteToText  # realizar a leitura dos arquivos
+
+import pandas as pd
 
 # criando pipeline
 pipeline_options = PipelineOptions(argv=None)
@@ -47,6 +49,30 @@ def tratar_data_chuva(item):
     return f"{uf}-{ano_mes}", mm
 
 
+def filtrar_campos_vazios(item):
+    chave, dados = item
+    #como if dados['chuva'] is not none and dados['dengue'] is not none
+    if all([
+        dados['chuva'],
+        dados['dengue']
+    ]):
+        return True
+    return False
+
+
+def descompactar_item(item):
+    chave, dados = item
+
+    uf, ano, mes = chave.split('-')
+    chuva = dados['chuva'][0]
+    dengue = dados['dengue'][0]
+
+    #return uf, int(ano), int(mes), chuva, dengue >>> proxima etapa precisa de strings
+    return uf, ano, mes, str(chuva), str(dengue)
+
+
+def preparar_CSV(item):
+    return f"{';'}".join(item)
 
 colunas_dengue = ['id', 'data_iniSE', 'casos', 'ibge_code', 'cidade', 'uf', 'cep', 'latitude', 'longitude']
 
@@ -80,11 +106,31 @@ chuva = (
     | "Converter o texto de chuvas em lista" >>
     beam.Map(texto_para_dicionario, ',')
     | "Converter data para ano_mes e gerar chave UF-ano_mes" >>
-        beam.Map(tratar_data_chuva)
+    beam.Map(tratar_data_chuva)
     | "Somar dados de chuva pela chave UF-ano_mes" >>
-        beam.CombinePerKey(sum)
-    | "Exibir resultado" >>
-    beam.Map(print)
+    beam.CombinePerKey(sum)
+    # | "Exibir resultado" >>
+    # beam.Map(print)
 )
 
+resultado = (
+    ({'chuva': chuva, 'dengue': dengue})
+    | "Unir as pcollections e agruparAgrupar pela chave" >>
+    beam.CoGroupByKey()
+    | "Remover itens que nao tem os 2 campos" >>
+    beam.Filter(filtrar_campos_vazios)
+    | "Descompactar itens" >>
+    beam.Map(descompactar_item)
+    | "Preparar CSV de saida" >>
+    beam.Map(preparar_CSV)
+    # | "Exibir resultado" >>
+    # beam.Map(print)
+)
+
+header = 'UF;ANO;MES;CHUVA;DENGUE'
+resultado | "Gravar arquivo CSV" >> WriteToText('saida_tratada',file_name_suffix='.csv',header=header)
+
 pipeline.run()
+
+df = pd.read_csv('saida_tratada.csv', delimiter=';')
+df.groupby(['UF', 'ANO'])[['CHUVA', 'DENGUE']].mean()
